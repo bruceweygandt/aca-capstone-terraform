@@ -11,3 +11,4 @@ lt-userdata.sh
 phase*-plan.txt
 .env
 *.pem
+_evidence-local/
