@@ -1,0 +1,13 @@
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfplan
+*.auto.tfvars
+!*.auto.tfvars.example
+_lab-ref/
+lab-inventory-*.txt
+lt-userdata.sh
+phase*-plan.txt
+.env
+*.pem
