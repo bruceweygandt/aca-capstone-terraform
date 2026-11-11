@@ -12,3 +12,4 @@ phase*-plan.txt
 .env
 *.pem
 _evidence-local/
+_vendor/

@@ -1,0 +1,9 @@
+# Copy to lab.auto.tfvars and fill in from your lab account (discovery output).
+db_subnet_group_name = "<lab DB subnet group name>"
+cloudlab_tag         = "<value of the lab's cloudlab tag>"
+
+existing_sg_ids = {
+  alb = "sg-xxxxxxxxxxxxxxxxx" # ALBSG
+  app = "sg-xxxxxxxxxxxxxxxxx" # Inventory-App
+  db  = "sg-xxxxxxxxxxxxxxxxx" # ExampleDB-SG
+}
