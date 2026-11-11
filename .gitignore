@@ -13,3 +13,4 @@ phase*-plan.txt
 *.pem
 _evidence-local/
 _vendor/
+terraform/imports_nat.tf

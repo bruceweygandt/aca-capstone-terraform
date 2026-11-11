@@ -1,4 +1,6 @@
 resource "aws_lb" "web" {
+  count = var.stack_enabled ? 1 : 0
+
   name               = "${var.project}-alb"
   load_balancer_type = "application"
   internal           = false
@@ -10,6 +12,8 @@ resource "aws_lb" "web" {
 }
 
 resource "aws_lb_target_group" "web" {
+  count = var.stack_enabled ? 1 : 0
+
   name                 = "${var.project}-tg"
   port                 = 80
   protocol             = "HTTP"
@@ -28,12 +32,14 @@ resource "aws_lb_target_group" "web" {
 }
 
 resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.web.arn
+  count = var.stack_enabled ? 1 : 0
+
+  load_balancer_arn = aws_lb.web[0].arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.web.arn
+    target_group_arn = aws_lb_target_group.web[0].arn
   }
 }

@@ -2,6 +2,8 @@
 # App uses the FIRST RDS instance and FIRST secret: keep exactly one of each.
 
 resource "aws_db_instance" "countries" {
+  count = var.stack_enabled ? 1 : 0
+
   identifier     = "${var.project}-mysql"
   engine         = "mysql"
   engine_version = var.db_engine_version

@@ -109,3 +109,20 @@ variable "cloudlab_tag" {
   description = "Lab-assigned tracking tag on pre-provisioned resources; preserve on import"
   type        = string
 }
+
+# ---------- Cost switch ----------
+variable "stack_enabled" {
+  description = "false = remove all billable resources (NAT, EIP, ALB, ASG, RDS); SGs and launch template stay"
+  type        = bool
+  default     = true
+}
+
+variable "nat_subnet_name" {
+  type    = string
+  default = "Public Subnet 1"
+}
+
+variable "app_route_table_name" {
+  type    = string
+  default = "Private Route Table App"
+}

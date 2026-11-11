@@ -1,3 +1,4 @@
+# Launch template stays even when the stack is off (free; keeps hardening auditable).
 resource "aws_launch_template" "app" {
   name_prefix            = "${var.project}-app-"
   image_id               = data.aws_launch_template.source.image_id
@@ -47,12 +48,14 @@ resource "aws_launch_template" "app" {
 }
 
 resource "aws_autoscaling_group" "app" {
+  count = var.stack_enabled ? 1 : 0
+
   name                      = "${var.project}-asg"
   min_size                  = var.asg_min
   desired_capacity          = var.asg_desired
   max_size                  = var.asg_max
   vpc_zone_identifier       = [for s in data.aws_subnet.app : s.id]
-  target_group_arns         = [aws_lb_target_group.web.arn]
+  target_group_arns         = [aws_lb_target_group.web[0].arn]
   health_check_type         = "ELB"
   health_check_grace_period = 300
 
@@ -74,12 +77,15 @@ resource "aws_autoscaling_group" "app" {
     propagate_at_launch = true
   }
 
-  depends_on = [aws_db_instance.countries]
+  # Boot needs the DB (app config) and the NAT route (package/code downloads).
+  depends_on = [aws_db_instance.countries, aws_route.app_default]
 }
 
 resource "aws_autoscaling_policy" "cpu_target" {
+  count = var.stack_enabled ? 1 : 0
+
   name                   = "${var.project}-cpu-target"
-  autoscaling_group_name = aws_autoscaling_group.app.name
+  autoscaling_group_name = aws_autoscaling_group.app[0].name
   policy_type            = "TargetTrackingScaling"
 
   target_tracking_configuration {
