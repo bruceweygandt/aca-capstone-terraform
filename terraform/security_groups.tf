@@ -1,5 +1,6 @@
-# Lab SGs adopted via import. Phase 1 mirrors current rules AND tags exactly.
-# Phase 2 (after auto-grader passes): apply the FINDING hardening.
+# Lab SGs adopted via import (rules + lab tags mirrored).
+# Phase 2: least-privilege egress per tier (KSI-CNA-RNT / SC-7). Egress targets use
+# subnet CIDRs rather than SG references, which would create an ALB -> app -> DB cycle.
 
 import {
   to = aws_security_group.alb
@@ -14,6 +15,11 @@ import {
 import {
   to = aws_security_group.db
   id = var.existing_sg_ids.db
+}
+
+locals {
+  app_subnet_cidrs = [for s in data.aws_subnet.app : s.cidr_block]
+  db_subnet_cidrs  = [for s in data.aws_subnet.db : s.cidr_block]
 }
 
 resource "aws_security_group" "alb" {
@@ -37,10 +43,11 @@ resource "aws_security_group" "alb" {
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    description = "Forward requests and health checks to the app tier only"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = local.app_subnet_cidrs
   }
 
   tags = {
@@ -73,10 +80,19 @@ resource "aws_security_group" "app" {
   }
 
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS via NAT: packages, app download, Secrets Manager, RDS API, SSM"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "MySQL to the DB subnets only"
+    from_port   = 3306
+    to_port     = 3306
+    protocol    = "tcp"
+    cidr_blocks = local.db_subnet_cidrs
   }
 
   tags = {
@@ -101,13 +117,8 @@ resource "aws_security_group" "db" {
     security_groups = [aws_security_group.app.id]
   }
 
-  # FINDING (SC-7): DB never needs outbound
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # The database never initiates connections: no egress at all.
+  egress = []
 
   tags = {
     Name     = "ExampleD-BSG" # lab's original tag value (typo preserved on purpose)

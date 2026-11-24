@@ -126,3 +126,9 @@ variable "app_route_table_name" {
   type    = string
   default = "Private Route Table App"
 }
+
+variable "db_subnet_names" {
+  description = "Private DB subnets (egress target for the app tier)"
+  type        = list(string)
+  default     = ["Private DB Subnet 1", "Private DB Subnet 2"]
+}
