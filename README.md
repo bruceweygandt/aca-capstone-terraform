@@ -1,187 +1,358 @@
-# AWS 3-Tier Web App: Terraform Build with Continuous Compliance Evidence
+<div align="center">
 
-Re-architecture of a PHP + MySQL web application from a single public EC2 host into a
-highly available, private, three-tier design on AWS, built entirely with Terraform and
-assessed against FedRAMP 20x Key Security Indicators (KSIs) and NIST 800-53 controls.
+# Compliance as Code on AWS
 
-> Built as a solo capstone for a cloud security course (AWS Academy Cloud Architecting
-> scenario). The lab instructions, application code, and dataset belong to AWS and are
-> **not** included in this repository.
+### A three-tier web app rebuilt in Terraform, with security controls proven by automated evidence
 
-## Status
+![Terraform](https://img.shields.io/badge/Terraform-1.17-7B42BC?logo=terraform&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-EC2%20%7C%20RDS%20%7C%20ALB%20%7C%20SSM-FF9900?logo=amazonwebservices&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FedRAMP 20x](https://img.shields.io/badge/FedRAMP%2020x-KSI--CNA--RNT-0B3D91)
+![NIST 800-53](https://img.shields.io/badge/NIST%20800--53-SC--7%20%7C%20CM--7%20%7C%20AC--6-2E7D32)
 
-| Phase | Scope | Status |
-|---|---|---|
-| 1 | Terraform build: ALB, Auto Scaling group, RDS MySQL, Secrets Manager, data import | Done |
-| 1b | Cost control: one `stack_enabled` switch removes the NAT gateway, ALB, ASG and RDS when idle | Done |
-| 2 | Least-privilege egress per tier, default security groups locked down | Done |
-| 2b | Drift detection against manual console changes | Planned |
-| 3 | Evidence collection with [paramify-fetchers](https://github.com/paramify/paramify-fetchers) and regex validators. KSI-CNA-RNT works from two sources; 3-day schedule and Paramify upload are next | In progress |
-| 4 | Shift-left IaC scanning (Checkov) as a pre-deploy gate | Planned |
+</div>
+
+---
+
+## In one minute
+
+A small research nonprofit ran its PHP website and MySQL database on a single public server and
+had just survived a ransomware attempt. I re-architected it on AWS as a private, highly available,
+three-tier system, built entirely with Terraform, then went one step further than the brief:
+**I wrote evidence fetchers and validators that prove the network controls work, found a gap with
+them, fixed it in code, and proved the fix with the same automation.**
+
+| | |
+|:--|:--|
+| **Infrastructure** | ALB across 2 AZs, Auto Scaling app tier in private subnets, private encrypted RDS, all in Terraform |
+| **Security findings** | 11 documented against NIST 800-53, each with a severity, an owner decision and a fix |
+| **Automated proof** | 2 fetchers, 6 validators, 1 FedRAMP 20x indicator, evidence collected from two independent sources |
+| **Verified fix** | Unrestricted egress went from **FAIL on 5 of 5 security groups** to **PASS** after one reviewed Terraform change |
+| **Cost control** | One switch takes every billable resource to zero when idle; a fixed lab budget was never at risk |
+
+---
+
+## Contents
+
+- [Architecture](#architecture)
+- [The compliance story: find, fix, prove](#the-compliance-story-find-fix-prove)
+- [How the evidence pipeline works](#how-the-evidence-pipeline-works)
+- [Security assessment](#security-assessment)
+- [Requirements traceability](#requirements-traceability)
+- [Engineering decisions](#engineering-decisions)
+- [Production recommendations](#production-recommendations)
+- [Run it yourself](#run-it-yourself)
+- [Roadmap](#roadmap)
+
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    U[Internet users] -->|HTTP 80| ALB
+    U([Internet users]) -->|HTTP 80| ALB
+    ADMIN([Administrator]) -.->|SSH tunneled through<br/>SSM Session Manager<br/>no inbound port 22| ASG
 
-    subgraph VPC["VPC (2 Availability Zones)"]
+    subgraph VPC["VPC across 2 Availability Zones"]
         subgraph PUB["Public subnets"]
-            ALB[Application Load Balancer]
+            ALB[Application<br/>Load Balancer]
             NAT[NAT gateway]
         end
         subgraph APP["Private app subnets"]
-            ASG["Auto Scaling group<br/>t2.micro x 2-4<br/>IMDSv2, encrypted EBS"]
+            ASG["Auto Scaling group<br/>t2.micro, 2 to 4 instances<br/>IMDSv2 only, encrypted EBS"]
         end
-        subgraph DB["Private DB subnets (no internet route)"]
-            RDS[(RDS MySQL<br/>encrypted, not public)]
+        subgraph DATA["Private DB subnets, no internet route"]
+            RDS[("RDS MySQL<br/>encrypted, not public")]
         end
     end
 
-    ALB -->|80 from ALB SG only| ASG
-    ASG -->|3306 from app SG only| RDS
-    ASG -->|egress via NAT| SM[Secrets Manager<br/>RDS-managed secret]
-    ADMIN[Administrator] -->|SSH over SSM<br/>no inbound port 22| ASG
+    ALB -->|80, from ALB group only| ASG
+    ASG -->|3306, to DB subnets only| RDS
+    ASG -->|443 only, via NAT| NAT
+    NAT --> SM[Secrets Manager<br/>RDS-managed, rotated secret]
+
+    classDef pub fill:#FFF4E0,stroke:#FF9900,color:#1a1a1a
+    classDef app fill:#E8F1FB,stroke:#0B5CAD,color:#1a1a1a
+    classDef data fill:#E9F5EC,stroke:#2E7D32,color:#1a1a1a
+    class ALB,NAT pub
+    class ASG app
+    class RDS data
 ```
 
-**Traffic is chained by security group reference, not CIDR:** internet to ALB, ALB to
-app tier, app tier to database. The database subnets have no route to the internet.
+Traffic moves one tier at a time and only on the port that tier needs. Every hop is enforced by a
+security group, and every security group is defined in Terraform.
+
+---
+
+## The compliance story: find, fix, prove
+
+The control under test is **FedRAMP 20x KSI-CNA-RNT, Restricting Network Traffic**: traffic in and
+out of the system is limited to what it actually needs.
+
+### 1. Find
+
+Two fetchers looked at the same control from two angles. The validators failed on outbound
+traffic: every security group, including the database's, allowed all traffic to anywhere.
+
+The two sources also disagreed. AWS reported **5** security groups, while Terraform knew about
+only **3**. The two missing ones were default security groups that no code controlled, and a
+Terraform-only audit would never have seen them.
+
+### 2. Fix
+
+One reviewed Terraform plan (`2 to add, 3 to change, 0 to destroy`):
+
+| Tier | Outbound before | Outbound after |
+|:--|:--|:--|
+| Load balancer | All traffic, anywhere | Port 80 to the app subnets only |
+| App servers | All traffic, anywhere | Port 443 out (packages, AWS APIs), port 3306 to the DB subnets |
+| Database | All traffic, anywhere | **None.** A database never needs to start a connection |
+| Default groups (2) | All traffic | **No rules at all**, and now under Terraform control |
+
+### 3. Prove
+
+The same fetchers and validators, run again:
+
+| Run | AWS API (what is enforced) | Terraform (what was declared) | Egress validator |
+|:--|:--|:--|:--:|
+| **Before** | 5 groups, 5 with unrestricted egress | 3 groups, 3 with unrestricted egress | ❌ FAIL |
+| **After** | 5 groups, 0 with unrestricted egress | 5 groups, 0 with unrestricted egress | ✅ PASS |
+
+All six validators now pass on both sources, and both sources agree on every security group.
+
+---
+
+## How the evidence pipeline works
+
+```mermaid
+flowchart LR
+    A[AWS EC2 API<br/>read-only identity] --> F1[aws_security_group_<br/>traffic_restriction]
+    T[Terraform state<br/>local or S3] --> F2[terraform_security_group_<br/>traffic_restriction]
+    F1 --> E1[(Evidence JSON<br/>+ summary)]
+    F2 --> E2[(Evidence JSON<br/>+ summary)]
+    E1 --> V{6 regex validators<br/>same engine as Paramify}
+    E2 --> V
+    V --> R[PASS / FAIL<br/>per evidence set]
+```
+
+Both fetchers are built on the open-source
+[paramify-fetchers](https://github.com/paramify/paramify-fetchers) framework and write
+**identical summary fields**, so a single set of validators reads either source. That design is
+the point: one claim, two independent proofs, and any disagreement between them is a finding.
+
+| Validator | Passes when |
+|:--|:--|
+| `collection_succeeded` | The fetcher finished without errors |
+| `sg_groups_evaluated` | At least one group was evaluated, so empty evidence cannot pass |
+| `sg_world_ingress_authorized_ports_only` | Nothing is open to the internet except ports 80 and 443 |
+| `sg_no_world_open_admin_ports` | SSH (22) and RDP (3389) are closed to the internet |
+| `sg_no_world_open_database_ports` | No database port is open to the internet |
+| `sg_no_unrestricted_egress` | No group allows all traffic outbound to the internet |
+
+<details>
+<summary><b>How the validators are tested</b></summary>
+
+<br/>
+
+A validator that can only ever pass is worse than none, because it looks like assurance. Every
+validator here has three test cases: compliant evidence that must pass, violating evidence that
+must fail, and evidence with a renamed field that must also fail instead of passing silently. A
+fourth case runs the whole validator set together and confirms a failed collection run cannot
+produce a pass.
+
+The fetchers have 9 unit tests on synthetic data, including one that confirms the AWS and
+Terraform fetchers produce the same summary for the same stack.
+
+</details>
+
+<details>
+<summary><b>Handling secrets in Terraform state</b></summary>
+
+<br/>
+
+Terraform state can contain passwords and keys, so the Terraform fetcher copies out only security
+group attributes. A test plants a fake secret in a state file and asserts it never appears in the
+evidence. Each evidence file records the state's SHA-256 hash, serial and lineage, so an assessor
+can tie it to one specific `terraform apply`.
+
+</details>
+
+<details>
+<summary><b>Sample evidence summary (identifiers removed)</b></summary>
+
+```json
+{
+  "source": "terraform_state",
+  "results": {
+    "summary": {
+      "groups_total": 5,
+      "ingress_rules_total": 4,
+      "sg_referenced_ingress_rules": 2,
+      "world_open_ingress_rules": 2,
+      "world_open_admin_port_rules": 0,
+      "world_open_db_port_rules": 0,
+      "world_open_disallowed_rules": 0,
+      "unrestricted_egress_groups": 0
+    }
+  }
+}
+```
+
+</details>
+
+---
+
+## Security assessment
+
+I reviewed the starting environment, the provided application code and the lab configuration the
+way an assessor would. Each finding has a status that reflects a deliberate decision.
+
+| # | Finding | NIST 800-53 | Severity | Status |
+|:--:|:--|:--|:--|:--|
+| 1 | The application writes the database password to the web server error log on every request | IA-5, AU-9 | High | Open: app code used as provided. RDS secret rotation limits exposure |
+| 2 | The web server role can read the whole account and write to every secret | AC-6 | High | Open: lab cannot change IAM. Scoped policy written as a recommendation |
+| 3 | No CloudTrail trail, VPC Flow Logs or AWS Config recorder | AU-2, AU-12, CA-7 | High | Open: services restricted in the lab |
+| 4 | HTTP only, no TLS on the load balancer | SC-8 | High | Accepted: out of scope per the brief |
+| 5 | The application picks the first secret and first database in the account | CM-6 | Medium | Open: recommend passing the secret ARN explicitly |
+| 6 | A MySQL server package is installed on every web server | CM-7 | Medium | Open: recommend client-only image |
+| 7 | Code is downloaded at boot with no integrity check; packages unpinned | SI-7, CM-2 | Medium | Open: recommend a golden AMI |
+| 8 | **Unrestricted outbound traffic on every tier, including the database** | **SC-7** | **Medium** | ✅ **Remediated and verified** |
+| 9 | Single NAT gateway in one AZ; single-AZ database | CP-10 | Medium | Open: cost trade-off for the lab |
+| 10 | Port 443 allowed on the load balancer and app groups with no HTTPS listener | CM-7 | Low | Planned: Phase 2b |
+| 11 | **Default security groups allowed traffic and sat outside any code** | **CM-7** | **Low** | ✅ **Remediated** (CIS AWS 5.4); deleting the unused default VPC still recommended |
+
+---
 
 ## Requirements traceability
 
-| Requirement | Implementation | KSI / Control |
-|---|---|---|
-| Secure hosting of the MySQL database | RDS in private DB subnets, `publicly_accessible = false`, storage encrypted | KSI-SVC, SC-28 |
-| Secure access to the database | DB security group allows 3306 only from the app security group; credentials in Secrets Manager | KSI-CNA, AC-3, IA-5 |
-| Anonymous access for web users | Internet-facing ALB on port 80 | Scope assumption |
-| Web servers in private subnets with admin access | ASG in private subnets; admin access via SSH tunneled through SSM Session Manager | KSI-CNA, AC-17 |
-| High availability through a load balancer | ALB across two AZs with health checks | KSI-CNA, CP-10 |
-| Automatic scaling with a launch template | Launch template + ASG (min 2, max 4) with CPU target tracking at 50% | KSI-CNA, SC-5 |
+| Customer requirement | How it is met | Control |
+|:--|:--|:--|
+| Secure hosting of the MySQL database | RDS in private subnets with no internet route, not publicly accessible, storage encrypted | SC-28, SC-7 |
+| Secure access to the database | Port 3306 allowed only from the app tier; credentials held in Secrets Manager | AC-3, IA-5 |
+| Anonymous access for web users | Internet-facing load balancer on port 80 | Scope assumption |
+| Web servers in private subnets with admin SSH | App tier in private subnets; SSH tunneled through SSM, so no port 22 is open anywhere | AC-17 |
+| High availability through a load balancer | Load balancer across two Availability Zones with health checks | CP-10 |
+| Automatic scaling with a launch template | Hardened launch template; Auto Scaling group of 2 to 4 with CPU target tracking at 50% | SC-5 |
 
-## Key design decisions
+---
 
-- **Brownfield adoption instead of rebuild.** The environment came with pre-provisioned
-  security groups. They are brought under Terraform with `import {}` blocks and
-  `lifecycle { prevent_destroy = true }`, keeping their IDs and existing tags, so
-  Terraform owns their rules and drift detection covers them. Pre-provisioned network
-  resources (VPC, subnets, DB subnet group, IAM instance profile) are referenced with
-  `data` sources and never managed.
-- **No database password in code or state.** `manage_master_user_password = true` lets
-  RDS create and rotate the secret in Secrets Manager. The password never appears in
-  Terraform files or `terraform.tfstate`.
-- **Hardened launch template.** Reuses the source template's AMI and bootstrap through a
-  data source (so no third-party content is copied), then adds IMDSv2 enforcement
-  (`http_tokens = "required"`), an encrypted gp3 root volume, and consistent tagging.
-- **SSH without open ports.** Administrators use real SSH tunneled through SSM Session
-  Manager (`AWS-StartSSHSession`). No security group allows inbound port 22, there is
-  no bastion host, and every session is authenticated by IAM and recorded by SSM.
-- **Credential-safe data import.** The SQL dump was loaded from an app instance through
-  an SSM session, reading credentials from Secrets Manager at runtime, passing the
-  password through `MYSQL_PWD` instead of the command line, and deleting the dump after.
+## Engineering decisions
 
-- **Cost switch.** The lab has a fixed budget, so every billable resource sits behind
-  `count = var.stack_enabled ? 1 : 0`. The lab's NAT gateway was imported so it can be
-  switched off too. `scripts/stack.sh down` leaves only free resources (security groups,
-  launch template) and costs nothing while idle.
+<details>
+<summary><b>Adopt what exists instead of rebuilding it</b></summary>
 
-## Security assessment findings
+<br/>
 
-Findings from reviewing the starting environment, the provided application, and the lab
-configuration. Items marked *accepted* are out of scope for this build by design; items marked
-*remediated* were fixed in Phase 2 and verified by the validators below.
+The environment arrived with security groups, a NAT gateway and a network already in place, the
+same situation as most real clients. Rather than recreate them, I brought them under Terraform
+with `import` blocks, kept their IDs and existing tags, and protected them with
+`prevent_destroy`. The network itself is read through `data` sources and never managed, so no
+Terraform command can delete it.
 
-| # | Finding | Control | Severity | Recommendation |
-|---|---|---|---|---|
-| 1 | Application writes the database password to the web server error log in plaintext on every request | IA-5, AU-9 | High | Remove the logging call; RDS-managed rotation limits exposure as a compensating control |
-| 2 | Web server role has `ReadOnlyAccess` to the whole account plus write access to every secret | AC-6 | High | Scoped policy: `GetSecretValue` on one secret ARN, `rds:DescribeDBInstances`, SSM core |
-| 3 | No CloudTrail trail, VPC Flow Logs, or AWS Config recorder | AU-2, AU-12, CA-7 | High | Organization trail, flow logs to S3, Config conformance pack |
-| 4 | HTTP only, no TLS on the load balancer | SC-8 | High (*accepted* per scope) | ACM certificate, HTTPS listener, HTTP-to-HTTPS redirect |
-| 5 | Application selects the first secret and first RDS instance in the account | CM-6 | Medium | Pass the secret ARN and endpoint explicitly (environment or SSM parameter) |
-| 6 | MySQL server package installed on every web server | CM-7 | Medium | Install the client only, or bake a minimal AMI |
-| 7 | Code downloaded at boot without integrity checks; unpinned package updates | SI-7, CM-2 | Medium | Golden AMI via EC2 Image Builder, or hash-verified artifacts from a private bucket |
-| 8 | Unrestricted egress on all tiers, including the database | SC-7 | Medium, *remediated* | Phase 2: ALB sends only port 80 to the app subnets; app sends only 443 out and 3306 to the DB subnets; DB has no egress |
-| 9 | Single NAT gateway in one AZ; single-AZ database | CP-10 | Medium | One NAT per AZ (or VPC endpoints); Multi-AZ RDS |
-| 10 | Port 443 allowed on ALB and app security groups with no HTTPS listener | CM-7 | Low | Remove until TLS is implemented |
-| 11 | Default VPC present with auto-assigned public IPs; default security groups allowed traffic | CM-7 | Low, partly *remediated* | Default security groups in both VPCs adopted into Terraform with every rule removed (CIS AWS 5.4). Deleting the unused default VPC is still recommended |
+</details>
 
-## Continuous evidence: KSI-CNA-RNT (Restricting Network Traffic)
+<details>
+<summary><b>No database password in code or in Terraform state</b></summary>
 
-One claim, proven from two independent sources:
+<br/>
 
-| Fetcher | Source | Proves |
-|---|---|---|
-| `aws_security_group_traffic_restriction` | EC2 `DescribeSecurityGroups` with a read-only identity | What AWS enforces right now |
-| `terraform_security_group_traffic_restriction` | This project's Terraform state | What was declared, reviewed and applied |
+`manage_master_user_password = true` has RDS generate the password and store it in Secrets
+Manager with rotation. The password never exists in this repository or in Terraform state, which
+removes the most common way IaC projects leak credentials.
 
-Both fetchers write the same summary fields, so one set of regex validators (evaluated
-with the same ECMAScript engine Paramify uses) checks both evidence sets:
+</details>
 
-| Validator | Passes when |
-|---|---|
-| `collection_succeeded` | The fetcher run finished without errors |
-| `sg_groups_evaluated` | At least one security group was evaluated, so empty evidence cannot pass |
-| `sg_world_ingress_authorized_ports_only` | Nothing is open to 0.0.0.0/0 or ::/0 except ports 80 and 443 |
-| `sg_no_world_open_admin_ports` | SSH (22) and RDP (3389) are not open to the internet |
-| `sg_no_world_open_database_ports` | No database port is open to the internet |
-| `sg_no_unrestricted_egress` | No security group allows all traffic outbound to the internet |
+<details>
+<summary><b>SSH access with no open ports</b></summary>
 
-Each validator has passing, failing and renamed-field test cases, which proves it can
-actually fail. The Terraform fetcher copies only security group attributes out of state;
-a test plants a fake secret in a state fixture and confirms it never reaches the evidence.
+<br/>
 
-**Results from the lab** (collected with the stack switched off, at no cost):
+The brief required SSH for administrators. Administrators get real SSH, tunneled through SSM
+Session Manager. No security group allows port 22, there is no bastion host to patch, and every
+session is authenticated through IAM and recorded by SSM.
 
-| Run | AWS API | Terraform | `sg_no_unrestricted_egress` |
-|---|---|---|---|
-| Before Phase 2 | 5 groups, 5 with unrestricted egress | 3 groups, 3 with unrestricted egress | FAIL on both |
-| After Phase 2 | 5 groups, none with unrestricted egress | 5 groups, none with unrestricted egress | PASS on both |
+</details>
 
-The first run showed why two sources matter. AWS reported two default security groups
-that existed in no code, so a Terraform-only audit would have missed them. Adopting them
-closed the gap, and both sources now report the same five groups.
+<details>
+<summary><b>Hardened launch template</b></summary>
 
-Evidence files contain account and resource IDs, so they are kept out of this repository.
+<br/>
 
-## Lab constraints and full-access recommendations
+The template reuses the provided AMI and bootstrap script through a data source, so no
+third-party content is copied into this repository, then adds IMDSv2 enforcement (which blocks
+the classic SSRF-to-credential-theft path), an encrypted gp3 root volume and consistent tagging.
 
-The lab account could not create IAM roles and limited services to what the scenario
-required. With full access, the recommended production design adds:
+</details>
 
-- **Identity:** IAM Identity Center with MFA for console access; per-workload least-privilege roles
-- **Governance:** AWS Organizations with service control policies; Control Tower landing zone
-- **Detection:** Security Hub (NIST 800-53 standard), GuardDuty, CloudTrail with metric alarms
-- **Network:** WAF on the ALB, VPC endpoints for SSM and Secrets Manager, NAT per AZ
-- **Data:** customer-managed KMS keys, Multi-AZ RDS, deletion protection, automated backups retained 7+ days
-- **Delivery:** remote Terraform state in encrypted S3 with locking; CI/CD-gated `terraform apply`
+<details>
+<summary><b>One switch for cost</b></summary>
 
-## Repository layout
+<br/>
+
+The lab runs on a fixed budget. Every billable resource sits behind
+`count = var.stack_enabled ? 1 : 0`, and `scripts/stack.sh down` removes the NAT gateway, load
+balancer, Auto Scaling group and database while leaving the free resources in place. Idle cost is
+effectively zero, and `stack.sh up` rebuilds everything in about ten minutes.
+
+`moved` blocks let me add the switch to resources that already existed without destroying them.
+The script also works around a lab permission gap: the lab cannot delete scaling policies
+directly, but deleting the Auto Scaling group removes them, so the script hands that cleanup to
+AWS.
+
+</details>
+
+---
+
+## Production recommendations
+
+The lab could not create IAM roles and limited which services were available. With full access,
+I would add:
+
+| Area | Recommendation |
+|:--|:--|
+| Identity | IAM Identity Center with MFA; one least-privilege role per workload |
+| Governance | AWS Organizations with service control policies; Control Tower landing zone |
+| Detection | Security Hub (NIST 800-53 standard), GuardDuty, CloudTrail with metric alarms |
+| Network | TLS through ACM, WAF on the load balancer, VPC endpoints instead of NAT for AWS APIs, one NAT per AZ |
+| Data | Customer-managed KMS keys, Multi-AZ RDS, deletion protection, 7+ days of backups |
+| Delivery | Encrypted remote state in S3 with locking; `terraform apply` only from CI after review |
+
+---
+
+## Run it yourself
+
+<details>
+<summary><b>Repository layout</b></summary>
 
 ```
 .
 ├── README.md
 ├── .gitignore                      # state, tfvars, lab material, local evidence
 ├── scripts/
-│   └── stack.sh                    # up | down | status: cost switch wrapper
+│   └── stack.sh                    # up | down | status: the cost switch
 └── terraform/
-    ├── .terraform.lock.hcl         # pinned AWS provider version
-    ├── versions.tf                 # Terraform/provider versions, default tags
-    ├── variables.tf                # inputs (network names, sizing, cost switch)
-    ├── data.tf                     # lookups: VPCs, subnets, route table, source launch template
-    ├── network.tf                  # adopted NAT gateway, EIP and app route (switchable)
-    ├── security_groups.tf          # imported ALB/app/DB SGs with least-privilege egress
-    ├── default_security_groups.tf  # default SGs in both VPCs, all rules removed
-    ├── database.tf                 # RDS MySQL with RDS-managed secret
-    ├── load_balancer.tf            # ALB, target group, HTTP listener
-    ├── compute.tf                  # hardened launch template, ASG, CPU scaling policy
+    ├── versions.tf                 # provider and version pins, default tags
+    ├── variables.tf                # inputs, including the cost switch
+    ├── data.tf                     # lookups: VPCs, subnets, route table, launch template
+    ├── network.tf                  # adopted NAT gateway and app route, switchable
+    ├── security_groups.tf          # ALB, app and DB groups with least-privilege egress
+    ├── default_security_groups.tf  # default groups in both VPCs, all rules removed
+    ├── database.tf                 # RDS MySQL with an RDS-managed secret
+    ├── load_balancer.tf            # ALB, target group, listener
+    ├── compute.tf                  # hardened launch template, Auto Scaling group, scaling policy
     ├── moves.tf                    # state moves from adding the cost switch
-    ├── outputs.tf                  # app URL, DB endpoint, secret ARN, ASG name
-    └── lab.auto.tfvars.example     # template; copy to lab.auto.tfvars (gitignored)
+    ├── outputs.tf
+    ├── .terraform.lock.hcl         # pinned provider checksums
+    └── lab.auto.tfvars.example     # copy to lab.auto.tfvars (gitignored)
 ```
 
-## Deploy
+</details>
 
-**Prerequisites:** Terraform 1.6+, AWS CLI v2, Session Manager plugin, an AWS profile
-with credentials for the target account.
+<details>
+<summary><b>Deploy and operate</b></summary>
+
+**Prerequisites:** Terraform 1.6+, AWS CLI v2, the Session Manager plugin, and an AWS profile for
+the target account.
 
 ```bash
 cp terraform/lab.auto.tfvars.example terraform/lab.auto.tfvars   # fill in your IDs
@@ -193,27 +364,35 @@ terraform apply plan.tfplan
 terraform output app_url
 ```
 
-**Turn billable resources off and on** (the lab budget is fixed, so nothing runs while idle):
-
 ```bash
-export AWS_PROFILE=<profile>
-scripts/stack.sh down     # removes NAT gateway, ALB, ASG and RDS; security groups and launch template stay
-scripts/stack.sh status   # confirm nothing billable is running
-scripts/stack.sh up       # recreates everything in about 10 minutes; RDS comes back empty, so re-import the data
+scripts/stack.sh status   # what is running and billing
+scripts/stack.sh down     # remove every billable resource
+scripts/stack.sh up       # bring it back in about 10 minutes (the database returns empty)
 ```
 
-## Repository hygiene
+</details>
 
-- Never committed: Terraform state, `*.auto.tfvars`, account IDs, credentials, lab materials
-- Every commit scanned with [gitleaks](https://github.com/gitleaks/gitleaks) before push
-- Infrastructure uses default tags (`Project`, `Environment`, `ManagedBy`) for traceability
+**Repository hygiene:** Terraform state, variable files, credentials, account IDs, lab material
+and collected evidence are never committed. Every commit is scanned with
+[gitleaks](https://github.com/gitleaks/gitleaks) before it is pushed.
+
+---
 
 ## Roadmap
 
-- **Phase 2b:** remove the unused 443 rules, then demonstrate drift detection
-  (`terraform plan -detailed-exitcode`) against a manual console change
-- **Phase 3:** collector instance running paramify-fetchers on a 3-day schedule
-  (systemd timer), uploading JSON evidence to Paramify where regex validators map
-  results to KSIs
-- **Phase 4:** Checkov scan of this Terraform as a pre-deploy gate, with its results
-  uploaded as evidence alongside the runtime checks
+- [x] Phase 1: Terraform build of the full three-tier stack
+- [x] Cost switch and adoption of the lab's NAT gateway
+- [x] Phase 2: least-privilege egress on every tier; default security groups locked down
+- [x] KSI-CNA-RNT evidence from two sources, with tested validators
+- [ ] Phase 2b: remove the unused 443 rules; drift detection demo against a manual console change
+- [ ] Collect evidence on a 3-day schedule and upload it to a GRC platform
+- [ ] Checkov scan of this Terraform as a gate before every apply
+
+---
+
+<div align="center">
+
+Built by **Bruce Weygandt** as a solo capstone for a cloud security course.<br/>
+The scenario, application code and dataset belong to AWS Academy and are not included here.
+
+</div>
